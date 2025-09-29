@@ -47,12 +47,6 @@ struct BoundedQueue{
         sem_init(&full_slots, 0, 0);
     }
 
-    // ~BoundedQueue() {
-    //     pthread_mutex_destroy(&mtx);
-    //     sem_destroy(&empty_slots);
-    //     sem_destroy(&full_slots);
-    // }
-
     void push(const T& item){
         sem_wait(&empty_slots);
         pthread_mutex_lock(&mtx);
@@ -64,7 +58,7 @@ struct BoundedQueue{
     }
 
     T pop(){
-        sem_wait(&full_slots);
+        sem_trywait(&full_slots);
         pthread_mutex_lock(&mtx);
         T item = buffer[front];
         front = (front + 1) % capacity;
@@ -78,6 +72,7 @@ struct BoundedQueue{
 // Queues
 BoundedQueue<pair<Individual, Individual>> q12(QUEUE_DEPTH);
 BoundedQueue<Individual> q23(QUEUE_DEPTH);
+int dispatch = 0;
 
 // Random generator
 random_device rd;
@@ -99,12 +94,13 @@ int computeCost(const string& s){
 }
 
 void* selection(void*){
-    // for(int i = 0; i < NUM_OFFSPRING / 2; i++){
+    cout << "[Selection] Thread ID " << pthread_self() << "started." << endl;
     while(true){
         pthread_mutex_lock(&parents_pool_mtx);
         if (parents_pool.size() < 2) {
             pthread_mutex_unlock(&parents_pool_mtx);
-            break; // not enough individuals to form a pair
+            // q12.push({Individual{"", 0, false}, Individual{"", 0, false}});
+            break;
         }
 
         // sort by cost descending
@@ -120,22 +116,30 @@ void* selection(void*){
         // remove them from pool
         parents_pool.erase(parents_pool.begin());
         parents_pool.erase(parents_pool.begin());
+        dispatch++;
+        dispatch++;
+
+        cout << "[Selection] Picked parents: "
+             << parent1.chromosome << "(Cost=" << parent1.cost << ") & "
+             << parent2.chromosome << "(Cost=" << parent2.cost << ")\n";
 
         pthread_mutex_unlock(&parents_pool_mtx);
 
         // push the pair into crossover queue
         q12.push({parent1, parent2});
-
-        cout << "[Selection] Picked parents: "
-             << parent1.chromosome << "(Cost=" << parent1.cost << ") & "
-             << parent2.chromosome << "(Cost=" << parent2.cost << ")\n";
     }
+    cout << "[Selection] Thread ID" << pthread_self() << "Exit!" << endl;
     return nullptr;
 }
 
 void* crossover(void*){
+    cout << "[Crossover] Thread ID " << pthread_self() << "started." << endl;
     for(int i = 0; i < NUM_OFFSPRING / 2; i++){
         auto parents = q12.pop();
+        // if(!parents.first.valid && !parents.second.valid){
+        //     // q23.push(Individual{"", 0, false});
+        //     break;
+        // }
         string p1 = parents.first.chromosome;
         string p2 = parents.second.chromosome;
 
@@ -149,22 +153,28 @@ void* crossover(void*){
         cout << "[Crossover] Produced: " << p1 << " , " << p2 << endl;
         // usleep(150000);
     }
+    // q23.push(Individual{"", 0, false});
+    cout << "[Crossover] Thread ID" << pthread_self() << "Exit!" << endl;
     return nullptr;
 }
 
 void* cost(void*){
+    cout << "[Cost] Thread ID " << pthread_self() << "started." << endl;
     for(int i = 0; i < NUM_OFFSPRING; i++){
+        if(dispatch == 0) break;
         Individual child = q23.pop();
         child.cost = computeCost(child.chromosome);
 
         pthread_mutex_lock(&offspring_pool_mtx);
         offspring_pool.push_back(child);
-        pthread_mutex_unlock(&offspring_pool_mtx);
-
         cout << "[Cost] Child: " << child.chromosome
              << " Cost=" << child.cost << endl;
+        dispatch--;
+        pthread_mutex_unlock(&offspring_pool_mtx);
+
         // usleep(120000);
     }
+    cout << "[Cost] Thread ID" << pthread_self() << "Exit!" << endl;
     return nullptr;
 }
 
@@ -199,6 +209,13 @@ int main(){
     for(int i = 0; i < NUM_SELECTION_THREADS; i++) pthread_join(selection_threads[i], nullptr);
     for(int i = 0; i < NUM_CROSSOVER_THREADS; i++) pthread_join(crossover_threads[i], nullptr);
     for(int i = 0; i < NUM_COST_THREADS; i++) pthread_join(cost_threads[i], nullptr);
+
+    pthread_mutex_destroy(&parents_pool_mtx);
+    pthread_mutex_destroy(&offspring_pool_mtx);
+    sem_destroy(&q12.empty_slots);
+    sem_destroy(&q12.full_slots);
+    sem_destroy(&q23.empty_slots);
+    sem_destroy(&q23.full_slots);
 
     cout << "-------------------------\nFinal offspring_pool Size: " << offspring_pool.size() << endl;
     for (auto& ind : offspring_pool) {
