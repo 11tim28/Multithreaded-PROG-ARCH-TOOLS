@@ -14,11 +14,11 @@ using namespace std;
 const int POP_SIZE = 10;
 const int CHROM_LEN = 10;
 const int NUM_OFFSPRING = 10;
-const int QUEUE_DEPTH = 10;
+const int QUEUE_DEPTH = 5;
 
-const int NUM_SELECTION_THREADS = 2;
-const int NUM_CROSSOVER_THREADS = 2;
-const int NUM_COST_THREADS = 2;
+const int NUM_SELECTION_THREADS = 4;
+const int NUM_CROSSOVER_THREADS = 4;
+const int NUM_COST_THREADS = 4;
 
 struct Individual{
     string chromosome;
@@ -94,13 +94,14 @@ int computeCost(const string& s){
 }
 
 void* selection(void*){
-    cout << "[Selection] Thread ID " << pthread_self() << "started." << endl;
-    while(true){
+    // cout << "[Selection] Thread ID " << pthread_self() << "started." << endl;
+    // while(true){
         pthread_mutex_lock(&parents_pool_mtx);
         if (parents_pool.size() < 2) {
             pthread_mutex_unlock(&parents_pool_mtx);
             // q12.push({Individual{"", 0, false}, Individual{"", 0, false}});
-            break;
+            // break;
+            return nullptr;
         }
 
         // sort by cost descending
@@ -127,14 +128,14 @@ void* selection(void*){
 
         // push the pair into crossover queue
         q12.push({parent1, parent2});
-    }
-    cout << "[Selection] Thread ID" << pthread_self() << "Exit!" << endl;
+    // }
+    // cout << "[Selection] Thread ID" << pthread_self() << "Exit!" << endl;
     return nullptr;
 }
 
 void* crossover(void*){
-    cout << "[Crossover] Thread ID " << pthread_self() << "started." << endl;
-    for(int i = 0; i < NUM_OFFSPRING / 2; i++){
+    // cout << "[Crossover] Thread ID " << pthread_self() << "started." << endl;
+    // for(int i = 0; i < NUM_OFFSPRING / 2; i++){
         auto parents = q12.pop();
         // if(!parents.first.valid && !parents.second.valid){
         //     // q23.push(Individual{"", 0, false});
@@ -152,16 +153,17 @@ void* crossover(void*){
         q23.push(child2);
         cout << "[Crossover] Produced: " << p1 << " , " << p2 << endl;
         // usleep(150000);
-    }
+    // }
     // q23.push(Individual{"", 0, false});
-    cout << "[Crossover] Thread ID" << pthread_self() << "Exit!" << endl;
+    // cout << "[Crossover] Thread ID" << pthread_self() << "Exit!" << endl;
     return nullptr;
 }
 
 void* cost(void*){
-    cout << "[Cost] Thread ID " << pthread_self() << "started." << endl;
-    for(int i = 0; i < NUM_OFFSPRING; i++){
-        if(dispatch == 0) break;
+    // cout << "[Cost] Thread ID " << pthread_self() << "started." << endl;
+    // for(int i = 0; i < NUM_OFFSPRING; i++){
+        // if(dispatch == 0) break;
+        if(dispatch == 0) return nullptr;
         Individual child = q23.pop();
         child.cost = computeCost(child.chromosome);
 
@@ -173,8 +175,8 @@ void* cost(void*){
         pthread_mutex_unlock(&offspring_pool_mtx);
 
         // usleep(120000);
-    }
-    cout << "[Cost] Thread ID" << pthread_self() << "Exit!" << endl;
+    // }
+    // cout << "[Cost] Thread ID" << pthread_self() << "Exit!" << endl;
     return nullptr;
 }
 
