@@ -1,4 +1,4 @@
-map: map.cpp
-	g++ -o map map.cpp -lpthread
+ga: ga.cpp
+	g++ -o ga ga.cpp -lpthread
 clean:
 	rm -rf map
