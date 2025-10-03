@@ -11,14 +11,14 @@
 
 using namespace std;
 
-const int POP_SIZE = 10;
-const int CHROM_LEN = 10;
-const int NUM_OFFSPRING = 10;
-const int QUEUE_DEPTH = 5;
+const int POP_SIZE = 100;
+const int CHROM_LEN = 20;
+const int NUM_OFFSPRING = 100;
+const int QUEUE_DEPTH = 10;
 
-const int NUM_SELECTION_THREADS = 4;
-const int NUM_CROSSOVER_THREADS = 4;
-const int NUM_COST_THREADS = 4;
+const int NUM_SELECTION_THREADS = 5;
+const int NUM_CROSSOVER_THREADS = 5;
+const int NUM_COST_THREADS = 5;
 
 struct Individual{
     string chromosome;
@@ -94,21 +94,18 @@ int computeCost(const string& s){
 }
 
 void* selection(void*){
-    // cout << "[Selection] Thread ID " << pthread_self() << "started." << endl;
-    // while(true){
+    int iteration = NUM_OFFSPRING / (NUM_SELECTION_THREADS * 2);
+    for(int i = 0; i < iteration; i++){
         pthread_mutex_lock(&parents_pool_mtx);
         if (parents_pool.size() < 2) {
             pthread_mutex_unlock(&parents_pool_mtx);
-            // q12.push({Individual{"", 0, false}, Individual{"", 0, false}});
-            // break;
-            return nullptr;
+            // return nullptr;
+            break;
         }
-
-        // sort by cost descending
-        sort(parents_pool.begin(), parents_pool.end(),
-             [](const Individual &a, const Individual &b) {
-                 return a.cost > b.cost;
-             });
+        // sort(parents_pool.begin(), parents_pool.end(),
+        //     [](const Individual &a, const Individual &b) {
+        //         return a.cost > b.cost;
+        //     });
 
         // pick first two as a pair
         Individual parent1 = parents_pool[0];
@@ -121,28 +118,31 @@ void* selection(void*){
         dispatch++;
 
         cout << "[Selection] Picked parents: "
-             << parent1.chromosome << "(Cost=" << parent1.cost << ") & "
-             << parent2.chromosome << "(Cost=" << parent2.cost << ")\n";
+                << parent1.chromosome << "(Cost=" << parent1.cost << ") & "
+                << parent2.chromosome << "(Cost=" << parent2.cost << ")\n";
+        // cout << "Dispatch: " << dispatch << endl;
 
         pthread_mutex_unlock(&parents_pool_mtx);
-
         // push the pair into crossover queue
         q12.push({parent1, parent2});
-    // }
-    // cout << "[Selection] Thread ID" << pthread_self() << "Exit!" << endl;
+    }
+
     return nullptr;
 }
 
 void* crossover(void*){
-    // cout << "[Crossover] Thread ID " << pthread_self() << "started." << endl;
-    // for(int i = 0; i < NUM_OFFSPRING / 2; i++){
+    int iteration = NUM_OFFSPRING / (NUM_CROSSOVER_THREADS * 2);
+    for(int i = 0; i < iteration; i++){
         auto parents = q12.pop();
-        // if(!parents.first.valid && !parents.second.valid){
-        //     // q23.push(Individual{"", 0, false});
-        //     break;
-        // }
         string p1 = parents.first.chromosome;
         string p2 = parents.second.chromosome;
+
+        if(p1.size() != CHROM_LEN || p2.size() != CHROM_LEN){
+            cerr << "[Error] Invalid chromosome length in crossover: "
+                      << "p1.size() = " << p1.size() << ", "
+                      << "p2.size() = " << p2.size() << endl;
+            continue;
+        }
 
         int point = CHROM_LEN / 2;
         for(int j = point; j < CHROM_LEN; j++){
@@ -152,31 +152,25 @@ void* crossover(void*){
         q23.push(child1);
         q23.push(child2);
         cout << "[Crossover] Produced: " << p1 << " , " << p2 << endl;
-        // usleep(150000);
-    // }
-    // q23.push(Individual{"", 0, false});
-    // cout << "[Crossover] Thread ID" << pthread_self() << "Exit!" << endl;
+        // cout << "Dispatch: " << dispatch << endl;
+    }
     return nullptr;
 }
 
 void* cost(void*){
-    // cout << "[Cost] Thread ID " << pthread_self() << "started." << endl;
-    // for(int i = 0; i < NUM_OFFSPRING; i++){
-        // if(dispatch == 0) break;
-        if(dispatch == 0) return nullptr;
+    int iteration = NUM_OFFSPRING / NUM_COST_THREADS;
+    for(int i = 0; i < iteration; i++){
         Individual child = q23.pop();
         child.cost = computeCost(child.chromosome);
 
         pthread_mutex_lock(&offspring_pool_mtx);
         offspring_pool.push_back(child);
         cout << "[Cost] Child: " << child.chromosome
-             << " Cost=" << child.cost << endl;
+                << " Cost=" << child.cost << endl;
         dispatch--;
+        // cout << "Dispatch: " << dispatch << endl;
         pthread_mutex_unlock(&offspring_pool_mtx);
-
-        // usleep(120000);
-    // }
-    // cout << "[Cost] Thread ID" << pthread_self() << "Exit!" << endl;
+    }
     return nullptr;
 }
 
@@ -189,14 +183,21 @@ int main(){
     }
     float parents_avg = 0;
     float offspring_avg = 0;
-    cout << "Initial parents_pool:\n";
+    // cout << "Initial parents_pool:\n";
     for (auto& ind : parents_pool) {
-        cout << ind.chromosome << " (Cost=" << ind.cost << ")\n";
+        // cout << ind.chromosome << " (Cost=" << ind.cost << ")\n";
         parents_avg += ind.cost;
     }
     parents_avg /= parents_pool.size();
     // cout << "Parents Average Cost: " << parents_avg << endl;
-    cout << "-------------------------\n";
+    // cout << "-------------------------\n";
+
+        // sort by cost descending
+    sort(parents_pool.begin(), parents_pool.end(),
+            [](const Individual &a, const Individual &b) {
+                return a.cost > b.cost;
+            });
+
 
     // Create Threads
     pthread_t selection_threads[NUM_SELECTION_THREADS];
