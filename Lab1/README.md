@@ -37,6 +37,11 @@ The following table shows the latency of different number of offsprings and numb
 
 In addition to latency, I also record the value of cost in offspring pool. Since I always select the parents with highest score in selection stage, I expect to get offsprings with higher score according to genetic algorithm. In my experiment, I observe the offspring pool has an approximate **25%** increase compared to parents pool, which verified the assumption of genetic algorithm.
 
+## Challenges
+This is my first time to implement a multithread program, which is quite different from sequential programming in most C++ program. The most common challenge I faced with is debugging. Since the program is running multithreaded, it’s hard to find the bug through traditional “cout” command, as threads are executing concurrently. 
+In addition, I got confused about how many operations each should execute for a while. Initially, I use a while loop and a global variable (e.g., selection_todo) to track the number of tasks remaining in this stage. However, I found that while loop is dangerous in exiting function. On the other hand, using global variable may potentially result in **false sharing** across multithreads. Therefore, I ended up no using global variable and use a for loop to execute tasks for each thread in stage. 
+
+
 ## Environment
 I test and run this project on LRC mario server.
 
