@@ -18,7 +18,17 @@ make
 ```
 After compiling, user can run the program using the following command
 ```bash
-./ga <number_of_threads> <number_of_offsprings>
+./ga <#Selection Threads> <#Crossover Threads> <#Cost Threads> <number_of_offsprings>
+```
+For example, if user want to produce 16 offsprings, with 4 threads in each stage
+```bash
+./ga 4 4 4 16
 ```
 
+##Experiments Results
+The following table shows the latency of different number of offsprings and number of threads. The following data are measure multiple times and take average from them. For simplicity, I use the same number of threads in each stage. 
+| Number of Offspring | 1 thread/stage | 2 threads/stage | 4 threads/stage | 8 threads/stage |
+|---------------------|----------------|-----------------|-----------------|-----------------| 
+| 16                  | 122.6 ms       | 96.2 ms         | 83.8 ms         | 76.4 ms         |
+| 64                  | 188.5 ms       | 183.2 ms        | 104 ms          | 100 ms          |
 
