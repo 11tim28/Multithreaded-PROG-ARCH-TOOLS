@@ -12,9 +12,13 @@ Initially, there are 100 parents in the parents' pool. User can specify the numb
 
 ## How to run?
 The code design is in ga.cpp. To compile it, simply "make" as a Makefile is provided.
-'''bash
+```bash
 #compile
 make
-'''
+```
+After compiling, user can run the program using the following command
+```bash
+./ga <number_of_threads> <number_of_offsprings>
+```
 
 
