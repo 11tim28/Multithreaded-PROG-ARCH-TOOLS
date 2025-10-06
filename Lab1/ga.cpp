@@ -9,14 +9,17 @@
 #include <algorithm>
 #include <chrono>
 #include <thread>
+#include <atomic>
+// #define _GNU_SOURCE
+#include <cmath>
 
 
 using namespace std;
 
 const int POP_SIZE = 100;
 const int CHROM_LEN = 20;
-const int NUM_OFFSPRING = 16;
-const int QUEUE_DEPTH = 24;
+int NUM_OFFSPRING = 16;
+const int QUEUE_DEPTH = 100;
 
 int NUM_SELECTION_THREADS = 4;
 int NUM_CROSSOVER_THREADS = 4;
@@ -36,6 +39,10 @@ vector<Individual> parents_pool;
 vector<Individual> offspring_pool;
 pthread_mutex_t parents_pool_mtx;
 pthread_mutex_t offspring_pool_mtx;
+atomic<bool> cancel{false};
+
+// pthread_barrier_t start_barrier;
+// pthread_barrier_t end_barrier;
 
 template <typename T>
 struct BoundedQueue{
@@ -100,15 +107,16 @@ int computeCost(const string& s){
 }
 
 void* selection(void*){
-    // while(selection_todo > 0){
+    // cout << "Selection iteration: " << NUM_OFFSPRING/(2*NUM_SELECTION_THREADS) << endl;
+    // pthread_barrier_wait(&start_barrier);
     for(int i = 0; i < NUM_OFFSPRING/(2*NUM_SELECTION_THREADS); i++){
-        pthread_t tid = pthread_self();
+        if(cancel){
+            cout << "[Selection] Thread cancelled.\n";
+            return nullptr;
+        }
+
         pthread_mutex_lock(&parents_pool_mtx);
-        // if (parents_pool.size() < 2) {
-        //     pthread_mutex_unlock(&parents_pool_mtx);
-        //     // return nullptr;
-        //     break;
-        // }
+        
 
         // pick first two as a pair
         Individual parent1 = parents_pool[0];
@@ -127,7 +135,7 @@ void* selection(void*){
         // dispatch++;
         // dispatch++;
 
-        // cout << "[Selection " << tid << " ] Picked parents: "
+        // cout << "[Selection] Picked parents: "
         //         << parent1.chromosome << "(Cost=" << parent1.cost << ") & "
         //         << parent2.chromosome << "(Cost=" << parent2.cost << ")\n";
         // cout << "[Selection] Remaining selection_todo: " << selection_todo << endl;
@@ -140,20 +148,16 @@ void* selection(void*){
 }
 
 void* crossover(void*){
-    // int iteration = NUM_OFFSPRING / (NUM_CROSSOVER_THREADS * 2);
-    // for(int i = 0; i < iteration; i++){
-    // while(crossover_todo > 0){
+
     for(int i = 0; i < NUM_OFFSPRING/(2*NUM_CROSSOVER_THREADS); i++){
+        if(cancel){
+            cout << "[Crossover] Thread cancelled.\n";
+            return nullptr;
+        }
         auto parents = q12.pop();
         string p1 = parents.first.chromosome;
         string p2 = parents.second.chromosome;
 
-        // if(p1.size() != CHROM_LEN || p2.size() != CHROM_LEN){
-        //     cerr << "[Error] Invalid chromosome length in crossover: "
-        //               << "p1.size() = " << p1.size() << ", "
-        //               << "p2.size() = " << p2.size() << endl;
-        //     continue;
-        // }
 
         int point = CHROM_LEN / 2;
         for(int j = point; j < CHROM_LEN; j++){
@@ -164,51 +168,40 @@ void* crossover(void*){
         Individual child1{p1, 0}, child2{p2, 0};
         q23.push(child1);
         q23.push(child2);
-        // crossover_todo--;
         // cout << "[Crossover] Produced: " << p1 << " , " << p2 << endl;
-        // cout << "[Crossover] Remaining crossover_todo: " << crossover_todo << endl;
-        // if(crossover_todo <= 0){
-        //     cout << "Crossover Done! " << endl;
-        //     break;
-        // }
-        // cout << "Dispatch: " << dispatch << endl;
-        // this_thread::sleep_for(chrono::microseconds(5));
+
     }
     return nullptr;
 }
 
 void* cost(void*){
-    // int iteration = NUM_OFFSPRING / NUM_COST_THREADS;
-    // for(int i = 0; i < iteration; i++){
-    // while(cost_todo > 0){
-    for(int i = 0; i < NUM_OFFSPRING/NUM_COST_THREADS; i++){
-        Individual child = q23.pop();
-        child.cost = computeCost(child.chromosome);
+    for(int i = 0; i < NUM_OFFSPRING/(2*NUM_COST_THREADS); i++){
+        if(cancel){
+            cout << "[Cost] Thread cancelled.\n";
+            return nullptr;
+        }
+        Individual child1 = q23.pop();
+        Individual child2 = q23.pop();
+        child1.cost = computeCost(child1.chromosome);
+        child2.cost = computeCost(child2.chromosome);
 
         // pthread_mutex_lock(&offspring_pool_mtx);
-        offspring_pool.push_back(child);
-        // cout << "[Cost] Child: " << child.chromosome
-        //         << " Cost=" << child.cost << endl;
-        // cout << "[Cost] Remaining cost_todo: " << cost_todo << endl;
-        // dispatch--;
-        // cost_todo--;
-        // if(cost_todo <= 0){
-        //     cout << "Cost Done! " << endl;
-        //     // pthread_mutex_unlock(&offspring_pool_mtx);
-        //     break;
-        // }
-        // cout << "Dispatch: " << dispatch << endl;
-        // pthread_mutex_unlock(&offspring_pool_mtx);
-        // this_thread::sleep_for(chrono::microseconds(5));
+        offspring_pool.push_back(child1);
+        offspring_pool.push_back(child2);
+        
+        // cout << "[Cost] Child: " << child1.chromosome
+        //         << " Cost=" << child1.cost << endl;
+
     }
     return nullptr;
 }
 
 int main(int argc, char* argv[]){
-    if(argc == 2){
+    if(argc == 3){
         NUM_SELECTION_THREADS = stoi(argv[1]);
         NUM_CROSSOVER_THREADS = stoi(argv[1]);
         NUM_COST_THREADS = stoi(argv[1]);
+        NUM_OFFSPRING = stoi(argv[2]);
     }
     cout << "Numbers of Threads in each stage:" << endl;
     cout << "Selection stage: " << NUM_SELECTION_THREADS << endl;
@@ -238,6 +231,8 @@ int main(int argc, char* argv[]){
                 return a.cost > b.cost;
             });
 
+    // pthread_barrier_init(&start_barrier, nullptr, NUM_SELECTION_THREADS+NUM_CROSSOVER_THREADS+NUM_COST_THREADS);
+    // pthread_barrier_init(&end_barrier, nullptr, NUM_SELECTION_THREADS+NUM_CROSSOVER_THREADS+NUM_COST_THREADS);
 
     // Create Threads
     pthread_t selection_threads[NUM_SELECTION_THREADS];
@@ -249,6 +244,10 @@ int main(int argc, char* argv[]){
     for(int i = 0; i < NUM_COST_THREADS; i++) pthread_create(&cost_threads[i], nullptr, cost, nullptr);
 
     auto start_time = chrono::high_resolution_clock::now();
+    // pthread_barrier_wait(&start_barrier);
+
+    // pthread_barrier_wait(&end_barrier);
+    // auto end_time = chrono::high_resolution_clock::now();
     // Join
     for(int i = 0; i < NUM_SELECTION_THREADS; i++) pthread_join(selection_threads[i], nullptr);
     for(int i = 0; i < NUM_CROSSOVER_THREADS; i++) pthread_join(crossover_threads[i], nullptr);
@@ -263,10 +262,13 @@ int main(int argc, char* argv[]){
     sem_destroy(&q23.empty_slots);
     sem_destroy(&q23.full_slots);
 
+    // pthread_barrier_destroy(&start_barrier);
+    // pthread_barrier_destroy(&end_barrier);
+
 
     cout << "-------------------------\nFinal offspring_pool Size: " << offspring_pool.size() << endl;
     for (auto& ind : offspring_pool) {
-        cout << ind.chromosome << " (Cost=" << ind.cost << ")\n";
+        // cout << ind.chromosome << " (Cost=" << ind.cost << ")\n";
         offspring_avg += ind.cost;
     }
     offspring_avg /= offspring_pool.size();
