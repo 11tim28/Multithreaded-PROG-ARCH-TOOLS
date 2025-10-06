@@ -178,11 +178,21 @@ int main(int argc, char* argv[]){
         NUM_CROSSOVER_THREADS = stoi(argv[2]);
         NUM_COST_THREADS = stoi(argv[3]);
         NUM_OFFSPRING = stoi(argv[4]);
+        cout << "Numbers of Threads in each stage:" << endl;
+        cout << "Selection stage: " << NUM_SELECTION_THREADS << endl;
+        cout << "Crossover stage: " << NUM_CROSSOVER_THREADS << endl;
+        cout << "Cost stage: " << NUM_COST_THREADS << endl;
     }
-    cout << "Numbers of Threads in each stage:" << endl;
-    cout << "Selection stage: " << NUM_SELECTION_THREADS << endl;
-    cout << "Crossover stage: " << NUM_CROSSOVER_THREADS << endl;
-    cout << "Cost stage: " << NUM_COST_THREADS << endl;
+    else {
+        // Display guidance message if arguments are incorrect
+        cout << "Usage: " << argv[0] << " <NUM_SELECTION_THREADS> <NUM_CROSSOVER_THREADS> <NUM_COST_THREADS> <NUM_OFFSPRING>" << endl;
+        cout << "Example: " << argv[0] << " 2 4 8 16" << endl;
+        return 1; // Exit with error code
+    }
+    // cout << "Numbers of Threads in each stage:" << endl;
+    // cout << "Selection stage: " << NUM_SELECTION_THREADS << endl;
+    // cout << "Crossover stage: " << NUM_CROSSOVER_THREADS << endl;
+    // cout << "Cost stage: " << NUM_COST_THREADS << endl;
 
     // Init parents_pool
     pthread_mutex_init(&parents_pool_mtx, nullptr);
@@ -239,10 +249,13 @@ int main(int argc, char* argv[]){
         cout << ind.chromosome << " (Cost=" << ind.cost << ")\n";
         offspring_avg += ind.cost;
     }
+    cout << "----------------------------" << endl;
+    cout << "////////////////[REPORT]//////////////////////" << endl;
     offspring_avg /= offspring_pool.size();
-    cout << "Parents Average Cost: " << parents_avg << endl;
-    cout << "Offspring Average Cost: " << offspring_avg << endl;
-    cout << "Duration: " << duration << " ms" << endl;
+    cout << "/// Parents Average Cost: " << parents_avg << "            ///" << endl;
+    cout << "/// Offspring Average Cost: " << offspring_avg << "          ///" << endl;
+    cout << "/// Duration: " << duration << " ms" << "                        ///" << endl;
+    cout << "//////////////////////////////////////////////" << endl;
 
     return 0;
 }
