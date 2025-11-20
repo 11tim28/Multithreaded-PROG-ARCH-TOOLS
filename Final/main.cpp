@@ -76,8 +76,16 @@ vector<Individual> crossover(const Individual& parent1, const Individual& parent
 }
 
 // CPU Task: Mutation - Placeholder
-void mutate(Individual& individual) {
-    // Placeholder implementation: no actual mutation
+// void mutate(Individual& individual) {
+//     // Placeholder implementation: no actual mutation
+// }
+
+void mutate(Individual& ind, default_random_engine& gen, float mutation_rate = 0.01f) {
+    uniform_real_distribution<float> prob(0.0f, 1.0f);
+    for (int i = 0; i < CHROMOSOME_LENGTH; ++i) {
+        if (prob(gen) < mutation_rate)
+            ind.chromosome[i] = 1 - ind.chromosome[i];
+    }
 }
 
 /**
@@ -126,8 +134,8 @@ void run_ga(SelectionStrategy strategy, vector<float>& best_scores_out, int run_
                 const Individual& parent2 = population[2 * i + 1];
                 
                 vector<Individual> children = crossover(parent1, parent2);
-                mutate(children[0]);
-                mutate(children[1]);
+                mutate(children[0], generator);
+                mutate(children[1], generator);
 
                 children_pool.push_back(children[0]);
                 children_pool.push_back(children[1]);
@@ -147,8 +155,8 @@ void run_ga(SelectionStrategy strategy, vector<float>& best_scores_out, int run_
                 const Individual& parent2 = population[idx2];
                 
                 vector<Individual> children = crossover(parent1, parent2);
-                mutate(children[0]);
-                mutate(children[1]);
+                mutate(children[0], generator);
+                mutate(children[1], generator);
 
                 children_pool.push_back(children[0]);
                 children_pool.push_back(children[1]);
@@ -191,20 +199,20 @@ void* run_ga_wrapper(void* args_ptr) {
 
 
 // --- Placeholder Implementation for GPU Interface (This will be replaced by CUDA code) ---
-std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children) {
-     std::vector<float> costs(children.size());
+// std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children) {
+//      std::vector<float> costs(children.size());
      
-     // The core logic (counting 1s) is simulated here:
-     for(size_t i = 0; i < children.size(); ++i) {
-         float sum = 0.0f;
-         for(int j = 0; j < CHROMOSOME_LENGTH; ++j) {
-             // Fitness is the sum of '1's, maximizing the cost.
-             sum += children[i].chromosome[j];
-         }
-         costs[i] = sum; 
-     }
-     return costs;
-}
+//      // The core logic (counting 1s) is simulated here:
+//      for(size_t i = 0; i < children.size(); ++i) {
+//          float sum = 0.0f;
+//          for(int j = 0; j < CHROMOSOME_LENGTH; ++j) {
+//              // Fitness is the sum of '1's, maximizing the cost.
+//              sum += children[i].chromosome[j];
+//          }
+//          costs[i] = sum; 
+//      }
+//      return costs;
+// }
 
 
 int main() {
