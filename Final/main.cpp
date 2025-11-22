@@ -12,7 +12,7 @@
 
 using namespace std;
 
-#define NUM_GEN 10000
+#define NUM_GEN 5
 
 // Define an enum to clearly specify the selection strategy
 enum class SelectionStrategy {
