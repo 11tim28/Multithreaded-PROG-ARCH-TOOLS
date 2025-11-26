@@ -14,6 +14,6 @@
  * * @param children A vector containing the new individuals (children) whose costs need evaluation.
  * @return A vector of floats representing the calculated costs.
  */
-std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children);
+std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children, float* gpu_time);
 
 #endif // GPU_INTERFACE_H
