@@ -6,6 +6,8 @@
 #include <cmath>
 #include <iomanip> // For std::setw
 #include <pthread.h> // NEW: Using POSIX threads instead of std::thread
+#include <time.h>
+#include <stdio.h>
 
 #include "ga_types.h"
 #include "gpu_interface.h"
@@ -13,6 +15,12 @@
 using namespace std;
 
 #define NUM_GEN 5
+
+double get_time_ms(){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
 
 // Define an enum to clearly specify the selection strategy
 enum class SelectionStrategy {
@@ -23,10 +31,12 @@ enum class SelectionStrategy {
 // --- Structure to pass multiple arguments to the pthread function ---
 // pthread_create only accepts a single void* argument, so we package the necessary data here.
 struct ThreadArgs {
-    SelectionStrategy strategy;
-    // We pass a pointer to the vector so the thread can modify the shared result vector.
-    std::vector<float>* best_scores_out; 
+    int tid;
+    int num_threads;
     int run_seed;
+    SelectionStrategy strategy;
+    const vector<Individual>* population;
+    vector<Individual>* children_pool;
 };
 
 // --- Comparison function for sorting based on cost (fitness) ---
@@ -97,6 +107,56 @@ int random_selection(const vector<Individual>& population, default_random_engine
     return distribution(generator);
 }
 
+vector<Individual> selection(SelectionStrategy strategy, const vector<Individual>& population, int idx, int seed){
+    vector<Individual> ans;
+    default_random_engine generator(seed); 
+    if(strategy == SelectionStrategy::SORTED_TRUNCATION){
+        ans.push_back(population[2*idx]);
+        ans.push_back(population[2*idx+1]);
+        return ans;
+    }
+    else{
+        int idx1 = random_selection(population, generator);
+        int idx2 = random_selection(population, generator);
+
+        while (idx1 == idx2) {
+            idx2 = random_selection(population, generator);
+        }
+        ans.push_back(population[idx1]);
+        ans.push_back(population[idx2]);
+        return ans;
+    }
+}
+
+void* ga_cpu_thread(void* arg){
+    ThreadArgs* args = (ThreadArgs*)arg;
+    int tid = args->tid;
+    int num_threads = args->num_threads;
+    int run_seed = args->run_seed;
+    SelectionStrategy strategy = args->strategy;
+    const vector<Individual>& population = *(args->population);
+    vector<Individual>& children_pool = *(args->children_pool);
+
+    default_random_engine generator(run_seed + tid * 99991);
+
+    int half = POPULATION_SIZE / 2;
+
+    int chunk = half / num_threads;
+    int start = tid * chunk;
+    int end = (tid == num_threads - 1) ? half : start + chunk;
+
+    for(int i = start; i < end; i++){
+        vector<Individual> parents = selection(strategy, population, i, run_seed + tid);
+        const Individual& parent1 = parents[0];
+        const Individual& parent2 = parents[1];
+        vector<Individual> children = crossover(parent1, parent2);
+        mutate(children[0], generator);
+        mutate(children[1], generator);
+        children_pool[2*i] = children[0];
+        children_pool[2*i+1] = children[1];
+    }
+}
+
 
 // --- Core GA Loop (Worker Function) ---
 void run_ga(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed) {
@@ -121,17 +181,21 @@ void run_ga(SelectionStrategy strategy, vector<float>& best_scores_out, int run_
 
 
     for (int gen = 0; gen < NUM_GEN; ++gen) {
+        double start = get_time_ms();
         // --- CPU PHASE 1: Selection, Crossover, Mutation ---
-        vector<Individual> children_pool;
+        vector<Individual> children_pool(POPULATION_SIZE);
         
+        vector<Individual> parents;
         
         if (strategy == SelectionStrategy::SORTED_TRUNCATION) {
             // Strategy 1: Sorted Truncation Selection
             sort(population.begin(), population.end(), compareIndividuals);
             
+            
             for (int i = 0; i < POPULATION_SIZE / 2; ++i) {
-                const Individual& parent1 = population[2 * i];
-                const Individual& parent2 = population[2 * i + 1];
+                parents = selection(strategy, population, i, run_seed);
+                const Individual& parent1 = parents[0];
+                const Individual& parent2 = parents[1];
                 
                 vector<Individual> children = crossover(parent1, parent2);
                 mutate(children[0], generator);
@@ -143,16 +207,9 @@ void run_ga(SelectionStrategy strategy, vector<float>& best_scores_out, int run_
         } else {
             // Strategy 2: Pure Random Selection
              for (int i = 0; i < POPULATION_SIZE / 2; ++i) {
-                int idx1 = random_selection(population, generator);
-                int idx2 = random_selection(population, generator);
-                
-                // Ensure they are different individuals
-                while (idx1 == idx2) {
-                     idx2 = random_selection(population, generator);
-                }
-
-                const Individual& parent1 = population[idx1];
-                const Individual& parent2 = population[idx2];
+                parents = selection(strategy, population, i, run_seed);
+                const Individual& parent1 = parents[0];
+                const Individual& parent2 = parents[1];
                 
                 vector<Individual> children = crossover(parent1, parent2);
                 mutate(children[0], generator);
@@ -162,7 +219,79 @@ void run_ga(SelectionStrategy strategy, vector<float>& best_scores_out, int run_
                 children_pool.push_back(children[1]);
             }
         }
+        double end = get_time_ms();
+        cout << "CPU time (single thread): " << end - start << " ms." << endl;
         
+        // --- CPU/GPU INTERFACE: Cost Evaluation Call (GPU SIMULATED) ---
+        vector<float> costs = evaluate_children_gpu(children_pool); 
+
+
+        // --- CPU PHASE 2: Reintegration & New Generation ---
+        
+        // 1. Update costs (Reintegration)
+        for (size_t i = 0; i < children_pool.size(); ++i) {
+            children_pool[i].cost = costs[i];
+        }
+
+        // 2. Survivor Selection (Generational replacement: children replace parents)
+        population = children_pool; 
+
+        // 3. Prepare for next generation (Sort to find best score)
+        sort(population.begin(), population.end(), compareIndividuals);
+
+        // Store the best cost for this generation
+        best_scores_out.push_back(population.front().cost); 
+    }
+}
+
+// --- Core GA Loop (Worker Function) ---
+void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed) {
+    
+    // Initialize the thread-local random number generator using the provided seed
+    default_random_engine generator(run_seed); 
+
+    // 1. Initialize Population
+    vector<Individual> population;
+    for (int i = 0; i < POPULATION_SIZE; ++i) {
+        population.push_back(create_random_individual(generator));
+    }
+
+    // --- CRITICAL PRE-LOOP STEP: Initial Cost Evaluation ---
+    vector<float> initial_costs = evaluate_children_gpu(population);
+    for (size_t i = 0; i < population.size(); ++i) {
+        population[i].cost = initial_costs[i];
+    }
+    
+    // Sort the population initially to find the best score
+    sort(population.begin(), population.end(), compareIndividuals);
+    best_scores_out.push_back(population.front().cost); // Store Gen 0 score
+
+    for (int gen = 0; gen < NUM_GEN; ++gen) {
+        double start = get_time_ms();
+        // ---------------- CPU Phase 1: threaded GA operators ----------------
+        vector<Individual> children_pool(POPULATION_SIZE);
+
+        const int NUM_THREADS = 64;
+        pthread_t threads[64];
+        ThreadArgs targs[64];
+
+        for (int t = 0; t < NUM_THREADS; t++) {
+            targs[t].tid = t;
+            targs[t].num_threads = NUM_THREADS;
+            targs[t].run_seed = run_seed + gen * 123456;
+            targs[t].strategy = strategy;
+            targs[t].population = &population;
+            targs[t].children_pool = &children_pool;
+
+            pthread_create(&threads[t], nullptr, ga_cpu_thread, &targs[t]);
+        }
+
+        // Wait for all threads
+        for (int t = 0; t < NUM_THREADS; t++)
+            pthread_join(threads[t], nullptr);
+        
+        double end = get_time_ms();
+        cout << "CPU time (multithreads): " << end - start << " ms." << endl;
         // --- CPU/GPU INTERFACE: Cost Evaluation Call (GPU SIMULATED) ---
         vector<float> costs = evaluate_children_gpu(children_pool); 
 
@@ -190,90 +319,124 @@ void run_ga(SelectionStrategy strategy, vector<float>& best_scores_out, int run_
  * @brief Required wrapper function for pthread_create.
  * @param args_ptr Pointer to the ThreadArgs structure.
  */
-void* run_ga_wrapper(void* args_ptr) {
-    ThreadArgs* args = static_cast<ThreadArgs*>(args_ptr);
-    run_ga(args->strategy, *args->best_scores_out, args->run_seed);
-    delete args; // Clean up arguments allocated in main
-    return NULL;
-}
-
-
-// --- Placeholder Implementation for GPU Interface (This will be replaced by CUDA code) ---
-// std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children) {
-//      std::vector<float> costs(children.size());
-     
-//      // The core logic (counting 1s) is simulated here:
-//      for(size_t i = 0; i < children.size(); ++i) {
-//          float sum = 0.0f;
-//          for(int j = 0; j < CHROMOSOME_LENGTH; ++j) {
-//              // Fitness is the sum of '1's, maximizing the cost.
-//              sum += children[i].chromosome[j];
-//          }
-//          costs[i] = sum; 
-//      }
-//      return costs;
+// void* run_ga_wrapper(void* args_ptr) {
+//     ThreadArgs* args = static_cast<ThreadArgs*>(args_ptr);
+//     run_ga(args->strategy, *args->best_scores_out, args->run_seed);
+//     delete args; // Clean up arguments allocated in main
+//     return NULL;
 // }
 
 
 int main() {
-    // Containers to hold results from concurrent runs
     vector<float> sorted_results;
     vector<float> random_results;
 
-    cout << "Starting concurrent GA runs (" << NUM_GEN << " generations each) on CPU threads using pthreads...\n";
+    cout << "Running GA sequentially (" << NUM_GEN << " generations each)...\n";
 
-    // Pthread declarations
-    pthread_t sorted_thread_id;
-    pthread_t random_thread_id;
-    
-    // 1. Prepare arguments for the Sorted Truncation thread
-    ThreadArgs* sorted_args = new ThreadArgs{
-        SelectionStrategy::SORTED_TRUNCATION,
-        &sorted_results,
-        (int)time(0)
-    };
+    // Run Sorted Truncation GA
+    int seed_sorted = (int)time(0);
+    // run_ga(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted);
+    run_ga_multithread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted);
 
-    // 2. Prepare arguments for the Pure Random thread
-    ThreadArgs* random_args = new ThreadArgs{
-        SelectionStrategy::RANDOM,
-        &random_results,
-        (int)time(0) + 1 // Use a different seed
-    };
-    
-    // 3. Launch the threads
-    pthread_create(&sorted_thread_id, NULL, run_ga_wrapper, sorted_args);
-    pthread_create(&random_thread_id, NULL, run_ga_wrapper, random_args);
-
-    // 4. Wait for both threads to complete (Join)
-    pthread_join(sorted_thread_id, NULL);
-    pthread_join(random_thread_id, NULL);
+    // Run Pure Random GA
+    int seed_random = (int)time(0) + 1;
+    // run_ga(SelectionStrategy::RANDOM, random_results, seed_random);
+    run_ga_multithread(SelectionStrategy::RANDOM, random_results, seed_random);
 
     // --- Final Comparison Report ---
     cout << "\n========================================================================\n";
-    cout << "                         CONCURRENT GA COMPARISON                       \n";
+    cout << "                           GA COMPARISON (SEQUENTIAL)                   \n";
     cout << "========================================================================\n";
     cout << "Generation | Sorted Truncation Best Cost | Pure Random Best Cost\n";
     cout << "-----------|-----------------------------|---------------------\n";
-    
+
     size_t num_generations = min(sorted_results.size(), random_results.size());
 
     for (size_t i = 0; i < num_generations; ++i) {
-        if(i > 0 && i < num_generations-1) continue;
+        if(i > 0 && i < num_generations - 1) continue;
+
         cout << setw(10) << i << " | "
              << setw(27) << sorted_results[i] << " | "
              << setw(19) << random_results[i] << endl;
 
-        // Stop printing if the optimal score is reached in the Sorted run
         if (sorted_results[i] >= CHROMOSOME_LENGTH) {
-             if (i < num_generations - 1) {
-                 cout << "--- OPTIMUM REACHED (Sorted) ---\n";
-             }
-             break; 
+            if (i < num_generations - 1) {
+                cout << "--- OPTIMUM REACHED (Sorted) ---\n";
+            }
+            break;
         }
     }
+
     cout << "========================================================================\n";
-    cout << "Final Best Score (Sorted Truncation): " << sorted_results.back() << " / " << CHROMOSOME_LENGTH << endl;
-    cout << "Final Best Score (Pure Random):       " << random_results.back() << " / " << CHROMOSOME_LENGTH << endl;
-    
+    cout << "Final Best Score (Sorted Truncation): " 
+         << sorted_results.back() << " / " << CHROMOSOME_LENGTH << endl;
+    cout << "Final Best Score (Pure Random):       " 
+         << random_results.back() << " / " << CHROMOSOME_LENGTH << endl;
+
     return 0;
 }
+
+
+
+// int main() {
+//     // Containers to hold results from concurrent runs
+//     vector<float> sorted_results;
+//     vector<float> random_results;
+
+//     cout << "Starting concurrent GA runs (" << NUM_GEN << " generations each) on CPU threads using pthreads...\n";
+
+//     // Pthread declarations
+//     pthread_t sorted_thread_id;
+//     pthread_t random_thread_id;
+    
+//     // 1. Prepare arguments for the Sorted Truncation thread
+//     ThreadArgs* sorted_args = new ThreadArgs{
+//         SelectionStrategy::SORTED_TRUNCATION,
+//         &sorted_results,
+//         (int)time(0)
+//     };
+
+//     // 2. Prepare arguments for the Pure Random thread
+//     ThreadArgs* random_args = new ThreadArgs{
+//         SelectionStrategy::RANDOM,
+//         &random_results,
+//         (int)time(0) + 1 // Use a different seed
+//     };
+    
+//     // 3. Launch the threads
+//     pthread_create(&sorted_thread_id, NULL, run_ga_wrapper, sorted_args);
+//     pthread_create(&random_thread_id, NULL, run_ga_wrapper, random_args);
+
+//     // 4. Wait for both threads to complete (Join)
+//     pthread_join(sorted_thread_id, NULL);
+//     pthread_join(random_thread_id, NULL);
+
+//     // --- Final Comparison Report ---
+//     cout << "\n========================================================================\n";
+//     cout << "                         CONCURRENT GA COMPARISON                       \n";
+//     cout << "========================================================================\n";
+//     cout << "Generation | Sorted Truncation Best Cost | Pure Random Best Cost\n";
+//     cout << "-----------|-----------------------------|---------------------\n";
+    
+//     size_t num_generations = min(sorted_results.size(), random_results.size());
+
+//     for (size_t i = 0; i < num_generations; ++i) {
+//         if(i > 0 && i < num_generations-1) continue;
+//         cout << setw(10) << i << " | "
+//              << setw(27) << sorted_results[i] << " | "
+//              << setw(19) << random_results[i] << endl;
+
+//         // Stop printing if the optimal score is reached in the Sorted run
+//         if (sorted_results[i] >= CHROMOSOME_LENGTH) {
+//              if (i < num_generations - 1) {
+//                  cout << "--- OPTIMUM REACHED (Sorted) ---\n";
+//              }
+//              break; 
+//         }
+//     }
+//     cout << "========================================================================\n";
+//     cout << "Final Best Score (Sorted Truncation): " << sorted_results.back() << " / " << CHROMOSOME_LENGTH << endl;
+//     cout << "Final Best Score (Pure Random):       " << random_results.back() << " / " << CHROMOSOME_LENGTH << endl;
+    
+//     return 0;
+// }
