@@ -1,0 +1,437 @@
+#include <iostream>
+#include <vector>
+#include <algorithm>
+#include <random>
+#include <ctime>
+#include <cmath>
+#include <iomanip> // For std::setw
+#include <pthread.h> // NEW: Using POSIX threads instead of std::thread
+#include <time.h>
+#include <stdio.h>
+
+#include "ga_types.h"
+#include "gpu_interface.h"
+
+using namespace std;
+
+// #define NUM_GEN 10
+
+double get_time_ms(){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+// Define an enum to clearly specify the selection strategy
+enum class SelectionStrategy {
+    SORTED_TRUNCATION,
+    RANDOM
+};
+
+// --- Structure to pass multiple arguments to the pthread function ---
+// pthread_create only accepts a single void* argument, so we package the necessary data here.
+struct ThreadArgs {
+    int tid;
+    int num_threads;
+    int run_seed;
+    SelectionStrategy strategy;
+    const vector<Individual>* population;
+    vector<Individual>* children_pool;
+};
+
+// --- Comparison function for sorting based on cost (fitness) ---
+bool compareIndividuals(const Individual& a, const Individual& b) {
+    return a.cost > b.cost;
+}
+
+Individual create_random_individual(default_random_engine& generator) {
+    Individual ind;
+    uniform_int_distribution<int> distribution(0, 1);
+    
+    for (int i = 0; i < CHROMOSOME_LENGTH; ++i) {
+        ind.chromosome[i] = distribution(generator);
+    }
+    ind.cost = -1.0f; 
+    return ind;
+}
+
+/**
+ * @function crossover
+ * @brief CPU Task: Performs Static Single-Point Crossover (at the midpoint).
+ */
+vector<Individual> crossover(const Individual& parent1, const Individual& parent2) {
+    vector<Individual> children(2);
+    
+    // Initialize children by copying parents first
+    children[0] = parent1;
+    children[1] = parent2;
+
+    // Determine the STATIC crossover point: The midpoint.
+    const int crossover_point = CHROMOSOME_LENGTH / 2;
+    
+    // Perform Static Single-Point Crossover
+    for (int i = 0; i < CHROMOSOME_LENGTH; ++i) {
+        if (i >= crossover_point) {
+            // After the crossover point, the genes are swapped:
+            children[0].chromosome[i] = parent2.chromosome[i]; 
+            children[1].chromosome[i] = parent1.chromosome[i]; 
+        } 
+    }
+    
+    // Reset costs since they are new, unevaluated individuals
+    children[0].cost = -1.0f; 
+    children[1].cost = -1.0f;
+    
+    return children; 
+}
+
+
+void mutate(Individual& ind, default_random_engine& gen, float mutation_rate = 0.01f) {
+    uniform_real_distribution<float> prob(0.0f, 1.0f);
+    for (int i = 0; i < CHROMOSOME_LENGTH; ++i) {
+        if (prob(gen) < mutation_rate)
+            ind.chromosome[i] = 1 - ind.chromosome[i];
+    }
+}
+
+/**
+ * @function random_selection
+ * @brief CPU Task: Selects one parent using pure random selection.
+ */
+int random_selection(const vector<Individual>& population, default_random_engine& generator) {
+    uniform_int_distribution<int> distribution(0, population.size() - 1);
+    return distribution(generator);
+}
+
+vector<Individual> selection(SelectionStrategy strategy, const vector<Individual>& population, int idx, int seed){
+    vector<Individual> ans;
+    default_random_engine generator(seed); 
+    if(strategy == SelectionStrategy::SORTED_TRUNCATION){
+        ans.push_back(population[2*idx]);
+        ans.push_back(population[2*idx+1]);
+        return ans;
+    }
+    else{
+        int idx1 = random_selection(population, generator);
+        int idx2 = random_selection(population, generator);
+
+        while (idx1 == idx2) {
+            idx2 = random_selection(population, generator);
+        }
+        ans.push_back(population[idx1]);
+        ans.push_back(population[idx2]);
+        return ans;
+    }
+}
+
+void* ga_cpu_thread(void* arg){
+    ThreadArgs* args = (ThreadArgs*)arg;
+    int tid = args->tid;
+    int num_threads = args->num_threads;
+    int run_seed = args->run_seed;
+    SelectionStrategy strategy = args->strategy;
+    const vector<Individual>& population = *(args->population);
+    vector<Individual>& children_pool = *(args->children_pool);
+
+    default_random_engine generator(run_seed + tid * 99991);
+
+    int half = POPULATION_SIZE / 2;
+
+    int chunk = half / num_threads;
+    int start = tid * chunk;
+    int end = (tid == num_threads - 1) ? half : start + chunk;
+
+    for(int i = start; i < end; i++){
+        vector<Individual> parents = selection(strategy, population, i, run_seed + tid);
+        const Individual& parent1 = parents[0];
+        const Individual& parent2 = parents[1];
+        vector<Individual> children = crossover(parent1, parent2);
+        mutate(children[0], generator);
+        mutate(children[1], generator);
+        children_pool[2*i] = children[0];
+        children_pool[2*i+1] = children[1];
+    }
+}
+
+
+
+// --- Core GA Loop (Worker Function) ---
+void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed, float* cpu_time, float* gpu_latency) {
+    // Initialize the thread-local random number generator using the provided seed
+    default_random_engine generator(run_seed); 
+
+    // 1. Initialize Population
+    vector<Individual> population;
+    for (int i = 0; i < POPULATION_SIZE; ++i) {
+        population.push_back(create_random_individual(generator));
+    }
+    float gpu_time;
+
+    // --- CRITICAL PRE-LOOP STEP: Initial Cost Evaluation ---
+    vector<float> initial_costs = evaluate_children_gpu(population, &gpu_time);
+    for (size_t i = 0; i < population.size(); ++i) {
+        population[i].cost = initial_costs[i];
+    }
+    
+    // Sort the population initially to find the best score
+    sort(population.begin(), population.end(), compareIndividuals);
+    best_scores_out.push_back(population.front().cost); // Store Gen 0 score
+    vector<double> cpu_execution;
+    vector<float> gpu_execution;
+
+
+
+    for (int gen = 0; gen < NUM_GEN; ++gen) {
+        double start = get_time_ms();
+        // --- CPU PHASE 1: Selection, Crossover, Mutation ---
+        vector<Individual> children_pool(POPULATION_SIZE);
+        
+        vector<Individual> parents;
+        
+        if (strategy == SelectionStrategy::SORTED_TRUNCATION) {
+            // Strategy 1: Sorted Truncation Selection
+            sort(population.begin(), population.end(), compareIndividuals);
+            
+            
+            for (int i = 0; i < POPULATION_SIZE / 2; ++i) {
+                parents = selection(strategy, population, i, run_seed);
+                const Individual& parent1 = parents[0];
+                const Individual& parent2 = parents[1];
+                
+                vector<Individual> children = crossover(parent1, parent2);
+                mutate(children[0], generator);
+                mutate(children[1], generator);
+
+                children_pool.push_back(children[0]);
+                children_pool.push_back(children[1]);
+            }
+        } else {
+            // Strategy 2: Pure Random Selection
+             for (int i = 0; i < POPULATION_SIZE / 2; ++i) {
+                parents = selection(strategy, population, i, run_seed);
+                const Individual& parent1 = parents[0];
+                const Individual& parent2 = parents[1];
+                
+                vector<Individual> children = crossover(parent1, parent2);
+                mutate(children[0], generator);
+                mutate(children[1], generator);
+
+                children_pool.push_back(children[0]);
+                children_pool.push_back(children[1]);
+            }
+        }
+        double end = get_time_ms();
+        // cout << "CPU time (single thread): " << end - start << " ms." << endl;
+        cpu_execution.push_back(end-start);
+        
+        // --- CPU/GPU INTERFACE: Cost Evaluation Call (GPU SIMULATED) ---
+        vector<float> costs = evaluate_children_gpu(children_pool, &gpu_time); 
+        gpu_execution.push_back(gpu_time);
+
+
+        // --- CPU PHASE 2: Reintegration & New Generation ---
+        
+        // 1. Update costs (Reintegration)
+        for (size_t i = 0; i < children_pool.size(); ++i) {
+            children_pool[i].cost = costs[i];
+        }
+
+        // 2. Survivor Selection (Generational replacement: children replace parents)
+        population = children_pool; 
+
+        // 3. Prepare for next generation (Sort to find best score)
+        sort(population.begin(), population.end(), compareIndividuals);
+
+        // Store the best cost for this generation
+        best_scores_out.push_back(population.front().cost); 
+    }
+    float tmp = 0;
+    for(auto& a : cpu_execution){
+        tmp += a;
+    }
+    tmp /= cpu_execution.size();
+    *cpu_time = tmp;
+    tmp = 0;
+    for(auto& b : gpu_execution){
+        tmp += b;
+    }
+    tmp /= gpu_execution.size();
+    *gpu_latency = tmp;
+}
+
+// --- Core GA Loop (Worker Function) ---
+void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed, float* cpu_time, float* gpu_latency) {
+    
+    // Initialize the thread-local random number generator using the provided seed
+    default_random_engine generator(run_seed); 
+
+    // 1. Initialize Population
+    vector<Individual> population;
+    for (int i = 0; i < POPULATION_SIZE; ++i) {
+        population.push_back(create_random_individual(generator));
+    }
+    float gpu_time;
+    // --- CRITICAL PRE-LOOP STEP: Initial Cost Evaluation ---
+    vector<float> initial_costs = evaluate_children_gpu(population, &gpu_time);
+    for (size_t i = 0; i < population.size(); ++i) {
+        population[i].cost = initial_costs[i];
+    }
+    
+    // Sort the population initially to find the best score
+    sort(population.begin(), population.end(), compareIndividuals);
+    best_scores_out.push_back(population.front().cost); // Store Gen 0 score
+    vector<double> cpu_execution;
+    vector<float> gpu_execution;
+
+    for (int gen = 0; gen < NUM_GEN; ++gen) {
+        double start = get_time_ms();
+        // ---------------- CPU Phase 1: threaded GA operators ----------------
+        vector<Individual> children_pool(POPULATION_SIZE);
+
+        const int NUM_THREADS = 64;
+        pthread_t threads[64];
+        ThreadArgs targs[64];
+
+        for (int t = 0; t < NUM_THREADS; t++) {
+            targs[t].tid = t;
+            targs[t].num_threads = NUM_THREADS;
+            targs[t].run_seed = run_seed + gen * 123456;
+            targs[t].strategy = strategy;
+            targs[t].population = &population;
+            targs[t].children_pool = &children_pool;
+
+            pthread_create(&threads[t], nullptr, ga_cpu_thread, &targs[t]);
+        }
+
+        // Wait for all threads
+        for (int t = 0; t < NUM_THREADS; t++)
+            pthread_join(threads[t], nullptr);
+        
+        double end = get_time_ms();
+        // cout << "CPU time (multithreads): " << end - start << " ms." << endl;
+        cpu_execution.push_back(end-start);
+        // --- CPU/GPU INTERFACE: Cost Evaluation Call (GPU SIMULATED) ---
+        vector<float> costs = evaluate_children_gpu(children_pool, &gpu_time); 
+        gpu_execution.push_back(gpu_time);
+
+
+        // --- CPU PHASE 2: Reintegration & New Generation ---
+        
+        // 1. Update costs (Reintegration)
+        for (size_t i = 0; i < children_pool.size(); ++i) {
+            children_pool[i].cost = costs[i];
+        }
+
+        // 2. Survivor Selection (Generational replacement: children replace parents)
+        population = children_pool; 
+
+        // 3. Prepare for next generation (Sort to find best score)
+        sort(population.begin(), population.end(), compareIndividuals);
+
+        // Store the best cost for this generation
+        best_scores_out.push_back(population.front().cost); 
+        float tmp = 0;
+        for(auto& a : cpu_execution){
+            tmp += a;
+        }
+        tmp /= cpu_execution.size();
+        *cpu_time = tmp;
+        tmp = 0;
+        for(auto& b : gpu_execution){
+            tmp += b;
+        }
+        tmp /= gpu_execution.size();
+        *gpu_latency = tmp;
+    }
+}
+
+/**
+ * @function run_ga_wrapper
+ * @brief Required wrapper function for pthread_create.
+ * @param args_ptr Pointer to the ThreadArgs structure.
+ */
+
+
+int main(int argc, char* argv[]) {
+    double start = get_time_ms();
+    vector<float> sorted_results;
+    vector<float> random_results;
+
+    cout << "Running GA sequentially (" << NUM_GEN << " generations each)...\n";
+
+    float sorted_cpu_time, random_cpu_time;
+    float sorted_gpu_time, random_gpu_time;
+
+    // Run Sorted Truncation GA
+    int seed_sorted = (int)time(0);
+    if(argv[1][0] == 's'){
+        run_ga_singlethread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time, &sorted_gpu_time);
+    }
+    else if(argv[1][0] == 'm'){
+        run_ga_multithread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time, &sorted_gpu_time);
+    }
+
+
+    // Run Pure Random GA
+    int seed_random = (int)time(0) + 1;
+    if(argv[1][0] == 's'){
+        run_ga_singlethread(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time, &random_gpu_time);
+    }
+    else if(argv[1][0] == 'm'){
+        run_ga_multithread(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time, &random_gpu_time);
+    }
+
+    // --- Final Comparison Report ---
+    cout << "\n========================================================================\n";
+    if(argv[1][0] == 's'){
+        cout << "                           GA COMPARISON (SINGLE THREAD)                   \n";
+    }
+    else if(argv[1][0] == 'm'){
+        cout << "                           GA COMPARISON (MULTI THREADS)                   \n";
+    }
+    cout << "========================================================================\n";
+    cout << "Generation | Sorted Truncation Best Cost | Pure Random Best Cost\n";
+    cout << "-----------|-----------------------------|---------------------\n";
+
+    size_t num_generations = min(sorted_results.size(), random_results.size());
+
+    for (size_t i = 0; i < num_generations; ++i) {
+        if(i > 0 && i < num_generations - 1) continue;
+
+        cout << setw(10) << i << " | "
+             << setw(27) << sorted_results[i] << " | "
+             << setw(19) << random_results[i] << endl;
+
+        if (sorted_results[i] >= CHROMOSOME_LENGTH) {
+            if (i < num_generations - 1) {
+                cout << "--- OPTIMUM REACHED (Sorted) ---\n";
+            }
+            break;
+        }
+    }
+
+    cout << "========================================================================\n";
+    cout << "Final Best Score (Sorted Truncation): " 
+         << sorted_results.back() << " / " << CHROMOSOME_LENGTH << endl;
+    cout << "Final Best Score (Pure Random):       " 
+         << random_results.back() << " / " << CHROMOSOME_LENGTH << endl;
+
+    cout << "========================================================================\n";
+    cout << "Avg. CPU Execution Time (Sorted Truncation): " 
+         << sorted_cpu_time << " ms " << endl;
+    cout << "Avg. CPU Execution Time (Pure Random):       " 
+         << random_cpu_time << " ms " << endl;
+    cout << "========================================================================\n";
+    cout << "Avg. GPU Execution Time (Sorted Truncation): " 
+         << sorted_gpu_time << " ms " << endl;
+    cout << "Avg. GPU Execution Time (Pure Random):       " 
+         << random_gpu_time << " ms " << endl;
+    cout << "========================================================================\n";
+
+    double end = get_time_ms();
+    cout << "Global Execution Time: " << end - start << " ms " << endl;
+    cout << "========================================================================\n";
+    return 0;
+}
+
+

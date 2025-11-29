@@ -14,7 +14,7 @@
 
 using namespace std;
 
-#define NUM_GEN 5
+// #define NUM_GEN 10
 
 double get_time_ms(){
     struct timespec ts;
@@ -157,9 +157,27 @@ void* ga_cpu_thread(void* arg){
     }
 }
 
+std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children, float* gpu_time) {
+    double start = get_time_ms();
+     std::vector<float> costs(children.size());
+
+     // The core logic (counting 1s) is simulated here:
+     for(size_t i = 0; i < children.size(); ++i) {
+         float sum = 0.0f;
+         for(int j = 0; j < CHROMOSOME_LENGTH; ++j) {
+             // Fitness is the sum of '1's, maximizing the cost.
+             sum += children[i].chromosome[j];
+         }
+         costs[i] = sum; 
+     }
+     double end = get_time_ms();
+     *gpu_time = end - start;
+     return costs;
+}
+
 
 // --- Core GA Loop (Worker Function) ---
-void run_ga(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed, float* cpu_time, float* gpu_latency) {
+void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed, float* cpu_time, float* gpu_latency) {
     // Initialize the thread-local random number generator using the provided seed
     default_random_engine generator(run_seed); 
 
@@ -247,20 +265,19 @@ void run_ga(SelectionStrategy strategy, vector<float>& best_scores_out, int run_
 
         // Store the best cost for this generation
         best_scores_out.push_back(population.front().cost); 
-
-        float tmp = 0;
-        for(auto& a : cpu_execution){
-            tmp += a;
-        }
-        tmp /= cpu_execution.size();
-        *cpu_time = tmp;
-        tmp = 0;
-        for(auto& b : gpu_execution){
-            tmp += b;
-        }
-        tmp /= gpu_execution.size();
-        *gpu_latency = tmp;
     }
+    float tmp = 0;
+    for(auto& a : cpu_execution){
+        tmp += a;
+    }
+    tmp /= cpu_execution.size();
+    *cpu_time = tmp;
+    tmp = 0;
+    for(auto& b : gpu_execution){
+        tmp += b;
+    }
+    tmp /= gpu_execution.size();
+    *gpu_latency = tmp;
 }
 
 // --- Core GA Loop (Worker Function) ---
@@ -356,7 +373,8 @@ void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_o
  */
 
 
-int main() {
+int main(int argc, char* argv[]) {
+    double start = get_time_ms();
     vector<float> sorted_results;
     vector<float> random_results;
 
@@ -367,17 +385,31 @@ int main() {
 
     // Run Sorted Truncation GA
     int seed_sorted = (int)time(0);
-    // run_ga(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time);
-    run_ga_multithread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time, &sorted_gpu_time);
+    if(argv[1][0] == 's'){
+        run_ga_singlethread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time, &sorted_gpu_time);
+    }
+    else if(argv[1][0] == 'm'){
+        run_ga_multithread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time, &sorted_gpu_time);
+    }
+
 
     // Run Pure Random GA
     int seed_random = (int)time(0) + 1;
-    // run_ga(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time);
-    run_ga_multithread(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time, &random_gpu_time);
+    if(argv[1][0] == 's'){
+        run_ga_singlethread(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time, &random_gpu_time);
+    }
+    else if(argv[1][0] == 'm'){
+        run_ga_multithread(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time, &random_gpu_time);
+    }
 
     // --- Final Comparison Report ---
     cout << "\n========================================================================\n";
-    cout << "                           GA COMPARISON (SEQUENTIAL)                   \n";
+    if(argv[1][0] == 's'){
+        cout << "                           GA COMPARISON (SINGLE THREAD)                   \n";
+    }
+    else if(argv[1][0] == 'm'){
+        cout << "                           GA COMPARISON (MULTI THREADS)                   \n";
+    }
     cout << "========================================================================\n";
     cout << "Generation | Sorted Truncation Best Cost | Pure Random Best Cost\n";
     cout << "-----------|-----------------------------|---------------------\n";
@@ -417,6 +449,9 @@ int main() {
          << random_gpu_time << " ms " << endl;
     cout << "========================================================================\n";
 
+    double end = get_time_ms();
+    cout << "Global Execution Time: " << end - start << " ms " << endl;
+    cout << "========================================================================\n";
     return 0;
 }
 

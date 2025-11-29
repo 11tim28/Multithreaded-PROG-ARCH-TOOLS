@@ -1,18 +1,30 @@
 # Compiler
 NVCC = nvcc
+CC = g++
 CXXFLAGS = -std=c++14 -O2
 LDFLAGS = -lpthread
 
 # Target name
-TARGET = ga_gpu
+GPU_TARGET = ga_gpu
+CPU_TARGET = ga_cpu
 
 # Source files
-SRCS = main.cpp gpu_cost.cu
+GPU_SRCS = main_gpu.cpp gpu_cost.cu
+CPU_SRCS = main_cpu.cpp
 
-all: $(TARGET)
+gpu: $(GPU_TARGET)
 
-$(TARGET): $(SRCS)
-	$(NVCC) $(CXXFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS)
+$(GPU_TARGET): $(GPU_SRCS)
+	$(NVCC) $(CXXFLAGS) $(GPU_SRCS) -o $(GPU_TARGET) $(LDFLAGS)
+	$(GPU_TARGET) singlethread
+	$(GPU_TARGET) multithreads
+
+cpu: $(CPU_TARGET)
+
+$(CPU_TARGET): $(CPU_SRCS)
+	$(CC) $(CPU_SRCS) -o $(CPU_TARGET) $(CXXFLAGS) $(LDFLAGS)
+	$(CPU_TARGET) singlethread
+	$(CPU_TARGET) multithreads
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(CPU_TARGET) $(GPU_TARGET)

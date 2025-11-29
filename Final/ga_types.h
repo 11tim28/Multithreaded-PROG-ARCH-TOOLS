@@ -3,9 +3,10 @@
 
 // --- System Configuration ---
 // These are constant values used by both the CPU and GPU code.
-const int CHROMOSOME_LENGTH = 100;
-const int POPULATION_SIZE = 16384;
+const int CHROMOSOME_LENGTH = 10000;
+const int POPULATION_SIZE = 1024;
 const float MUTATION_RATE = 0.01f;
+const int NUM_GEN = 10;
 
 /**
  * @struct Individual
