@@ -30,5 +30,6 @@ make cpu
 ```
 To run CPU + GPU mode:
 ```bash
+# CPU + GPU mode
 make gpu
 ```
