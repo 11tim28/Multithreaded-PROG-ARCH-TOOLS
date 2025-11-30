@@ -17,6 +17,39 @@ void cost_kernel(const gene_t* d_chromosomes, float* d_costs, int num_children) 
     d_costs[idx] = sum;
 }
 
+#define HEAVY_ITERS 500
+
+__global__
+void cost_kernel_heavy(const gene_t* d_chromosomes, float* d_costs, int num_children) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_children) return;
+
+    float sum = 0.0f;
+    const gene_t* child = d_chromosomes + idx * CHROMOSOME_LENGTH;
+
+    for (int j = 0; j < CHROMOSOME_LENGTH; j++) {
+        int bit = child[j];
+        if (bit == 0) continue;
+
+        float acc = 0.0f;
+
+        // HEAVY MATH LOOP
+        #pragma unroll 4
+        for (int k = 1; k <= HEAVY_ITERS; k++) {
+            float a = __sinf(j * 0.01f * k);
+            float b = __cosf((j + 1) * 0.02f * k);
+            float c = __logf(1.0f + j * k * 0.0001f);
+
+            acc += a * b + c;
+        }
+
+        sum += acc;
+    }
+
+    d_costs[idx] = sum;
+}
+
+
 std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children, float* gpu_time)
 {
     int N = children.size();
@@ -50,7 +83,8 @@ std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children
     // Launch kernel
     int block = 128;
     int grid = (N + block - 1) / block;
-    cost_kernel<<<grid, block>>>(d_chromosomes, d_costs, N);
+    // cost_kernel<<<grid, block>>>(d_chromosomes, d_costs, N);
+    cost_kernel_heavy<<<grid, block>>>(d_chromosomes, d_costs, N);
 
     cudaEventRecord(stop);   // <<< STOP TIMING >>>
     cudaEventSynchronize(stop);

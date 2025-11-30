@@ -8,6 +8,7 @@
 #include <pthread.h> // NEW: Using POSIX threads instead of std::thread
 #include <time.h>
 #include <stdio.h>
+#include <valarray>     // std::valarray, std::log(valarray)
 
 #include "ga_types.h"
 #include "gpu_interface.h"
@@ -175,6 +176,45 @@ std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children
      return costs;
 }
 
+// heavy CPU cost function
+static const int HEAVY_ITERS = 500;
+
+std::vector<float> evaluate_children_gpu_heavy(const std::vector<Individual>& children, float* gpu_time) {
+    double start = get_time_ms();
+    std::vector<float> costs(children.size());
+
+    for (size_t i = 0; i < children.size(); ++i) {
+        float sum = 0.0f;
+
+        for (int j = 0; j < CHROMOSOME_LENGTH; j++) {
+            int bit = children[i].chromosome[j];
+
+            // Skip if bit = 0 (still faster)
+            if (bit == 0) continue;
+
+            float acc = 0.0f;
+
+            // Heavy math to stress CPU/GPU
+            for (int k = 1; k <= HEAVY_ITERS; k++) {
+                float a = std::sin(j * 0.01f * k);
+                float b = std::cos((j + 1) * 0.02f * k);
+                float c = std::log(1.0f + j * k * 0.0001f);
+
+                acc += a * b + c;
+            }
+
+            sum += acc;
+        }
+
+        costs[i] = sum;
+    }
+
+    double end = get_time_ms();
+    *gpu_time = end - start;
+    return costs;
+}
+
+
 
 // --- Core GA Loop (Worker Function) ---
 void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed, float* cpu_time, float* gpu_latency) {
@@ -189,7 +229,8 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
     float gpu_time;
 
     // --- CRITICAL PRE-LOOP STEP: Initial Cost Evaluation ---
-    vector<float> initial_costs = evaluate_children_gpu(population, &gpu_time);
+    // vector<float> initial_costs = evaluate_children_gpu(population, &gpu_time);
+    vector<float> initial_costs = evaluate_children_gpu_heavy(population, &gpu_time);
     for (size_t i = 0; i < population.size(); ++i) {
         population[i].cost = initial_costs[i];
     }
@@ -246,7 +287,8 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
         cpu_execution.push_back(end-start);
         
         // --- CPU/GPU INTERFACE: Cost Evaluation Call (GPU SIMULATED) ---
-        vector<float> costs = evaluate_children_gpu(children_pool, &gpu_time); 
+        // vector<float> costs = evaluate_children_gpu(children_pool, &gpu_time); 
+        vector<float> costs = evaluate_children_gpu_heavy(children_pool, &gpu_time); 
         gpu_execution.push_back(gpu_time);
 
 
@@ -293,7 +335,8 @@ void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_o
     }
     float gpu_time;
     // --- CRITICAL PRE-LOOP STEP: Initial Cost Evaluation ---
-    vector<float> initial_costs = evaluate_children_gpu(population, &gpu_time);
+    // vector<float> initial_costs = evaluate_children_gpu(population, &gpu_time);
+    vector<float> initial_costs = evaluate_children_gpu_heavy(population, &gpu_time);
     for (size_t i = 0; i < population.size(); ++i) {
         population[i].cost = initial_costs[i];
     }
@@ -332,7 +375,8 @@ void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_o
         // cout << "CPU time (multithreads): " << end - start << " ms." << endl;
         cpu_execution.push_back(end-start);
         // --- CPU/GPU INTERFACE: Cost Evaluation Call (GPU SIMULATED) ---
-        vector<float> costs = evaluate_children_gpu(children_pool, &gpu_time); 
+        // vector<float> costs = evaluate_children_gpu(children_pool, &gpu_time); 
+        vector<float> costs = evaluate_children_gpu_heavy(children_pool, &gpu_time); 
         gpu_execution.push_back(gpu_time);
 
 
