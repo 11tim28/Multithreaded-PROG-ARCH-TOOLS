@@ -81,10 +81,10 @@ std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children
     cudaEventRecord(start);  // <<< START TIMING >>>
 
     // Launch kernel
-    int block = 128;
-    int grid = (N + block - 1) / block;
+    // int BLOCK = 128;
+    int grid = (N + BLOCK_SIZE - 1) / BLOCK_SIZE;
     // cost_kernel<<<grid, block>>>(d_chromosomes, d_costs, N);
-    cost_kernel_heavy<<<grid, block>>>(d_chromosomes, d_costs, N);
+    cost_kernel_heavy<<<grid, BLOCK_SIZE>>>(d_chromosomes, d_costs, N);
 
     cudaEventRecord(stop);   // <<< STOP TIMING >>>
     cudaEventSynchronize(stop);

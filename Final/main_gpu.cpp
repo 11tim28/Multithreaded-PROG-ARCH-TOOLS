@@ -8,6 +8,8 @@
 #include <pthread.h> // NEW: Using POSIX threads instead of std::thread
 #include <time.h>
 #include <stdio.h>
+#include <valarray>     // std::valarray, std::log(valarray)
+#include <fstream>
 
 #include "ga_types.h"
 #include "gpu_interface.h"
@@ -55,6 +57,14 @@ Individual create_random_individual(default_random_engine& generator) {
     return ind;
 }
 
+inline void small_busy_wait(int iterations = 2000) {
+    volatile float x = 0.0f;
+    for (int i = 0; i < iterations; i++) {
+        x = x * 1.01f + 0.0001f;  // meaningless math
+    }
+}
+
+
 /**
  * @function crossover
  * @brief CPU Task: Performs Static Single-Point Crossover (at the midpoint).
@@ -71,6 +81,7 @@ vector<Individual> crossover(const Individual& parent1, const Individual& parent
     
     // Perform Static Single-Point Crossover
     for (int i = 0; i < CHROMOSOME_LENGTH; ++i) {
+        small_busy_wait();
         if (i >= crossover_point) {
             // After the crossover point, the genes are swapped:
             children[0].chromosome[i] = parent2.chromosome[i]; 
@@ -86,6 +97,7 @@ vector<Individual> crossover(const Individual& parent1, const Individual& parent
 }
 
 
+
 void mutate(Individual& ind, default_random_engine& gen, float mutation_rate = 0.01f) {
     uniform_real_distribution<float> prob(0.0f, 1.0f);
     for (int i = 0; i < CHROMOSOME_LENGTH; ++i) {
@@ -93,6 +105,7 @@ void mutate(Individual& ind, default_random_engine& gen, float mutation_rate = 0
             ind.chromosome[i] = 1 - ind.chromosome[i];
     }
 }
+
 
 /**
  * @function random_selection
@@ -153,10 +166,29 @@ void* ga_cpu_thread(void* arg){
     }
 }
 
+// std::vector<float> evaluate_children_gpu(const std::vector<Individual>& children, float* gpu_time) {
+//     double start = get_time_ms();
+//      std::vector<float> costs(children.size());
+
+//      // The core logic (counting 1s) is simulated here:
+//      for(size_t i = 0; i < children.size(); ++i) {
+//          float sum = 0.0f;
+//          for(int j = 0; j < CHROMOSOME_LENGTH; ++j) {
+//              // Fitness is the sum of '1's, maximizing the cost.
+//              sum += children[i].chromosome[j];
+//          }
+//          costs[i] = sum; 
+//      }
+//      double end = get_time_ms();
+//      *gpu_time = end - start;
+//      return costs;
+// }
+
+
 
 
 // --- Core GA Loop (Worker Function) ---
-void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed, float* cpu_time, float* gpu_latency) {
+void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed, float* cpu_time, float* gpu_latency, Individual* global_best_individual, vector<float>& global_best_scores) {
     // Initialize the thread-local random number generator using the provided seed
     default_random_engine generator(run_seed); 
 
@@ -169,13 +201,19 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
 
     // --- CRITICAL PRE-LOOP STEP: Initial Cost Evaluation ---
     vector<float> initial_costs = evaluate_children_gpu(population, &gpu_time);
+    // vector<float> initial_costs = evaluate_children_gpu_heavy(population, &gpu_time);
     for (size_t i = 0; i < population.size(); ++i) {
         population[i].cost = initial_costs[i];
     }
     
     // Sort the population initially to find the best score
     sort(population.begin(), population.end(), compareIndividuals);
-    best_scores_out.push_back(population.front().cost); // Store Gen 0 score
+    best_scores_out.push_back(population.front().cost); // Store Gen 0 score    // Global-best tracking
+    float global_best_cost = population.front().cost;
+    // global_best_scores.push_back(global_best_cost);
+    if (global_best_individual)
+      *global_best_individual = population.front();
+    
     vector<double> cpu_execution;
     vector<float> gpu_execution;
 
@@ -184,7 +222,7 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
     for (int gen = 0; gen < NUM_GEN; ++gen) {
         double start = get_time_ms();
         // --- CPU PHASE 1: Selection, Crossover, Mutation ---
-        vector<Individual> children_pool(POPULATION_SIZE);
+        vector<Individual> children_pool;
         
         vector<Individual> parents;
         
@@ -204,6 +242,8 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
 
                 children_pool.push_back(children[0]);
                 children_pool.push_back(children[1]);
+                // children_pool[2*i] = children[0];
+                // children_pool[2*i+1] = children[1];
             }
         } else {
             // Strategy 2: Pure Random Selection
@@ -218,6 +258,8 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
 
                 children_pool.push_back(children[0]);
                 children_pool.push_back(children[1]);
+                // children_pool[2*i] = children[0];
+                // children_pool[2*i+1] = children[1];
             }
         }
         double end = get_time_ms();
@@ -226,6 +268,7 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
         
         // --- CPU/GPU INTERFACE: Cost Evaluation Call (GPU SIMULATED) ---
         vector<float> costs = evaluate_children_gpu(children_pool, &gpu_time); 
+        // vector<float> costs = evaluate_children_gpu_heavy(children_pool, &gpu_time); 
         gpu_execution.push_back(gpu_time);
 
 
@@ -244,6 +287,15 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
 
         // Store the best cost for this generation
         best_scores_out.push_back(population.front().cost); 
+        // --- Global best update (monotonic) ---
+        if (population.front().cost > global_best_cost) {
+            global_best_cost   = population.front().cost;
+            if (global_best_individual)
+              *global_best_individual = population.front();
+        }
+
+        // Store global best cost for convergence curve
+        global_best_scores.push_back(global_best_cost); 
     }
     float tmp = 0;
     for(auto& a : cpu_execution){
@@ -260,7 +312,7 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
 }
 
 // --- Core GA Loop (Worker Function) ---
-void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed, float* cpu_time, float* gpu_latency) {
+void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_out, int run_seed, float* cpu_time, float* gpu_latency, Individual* global_best_individual, vector<float>& global_best_scores) {
     
     // Initialize the thread-local random number generator using the provided seed
     default_random_engine generator(run_seed); 
@@ -273,6 +325,7 @@ void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_o
     float gpu_time;
     // --- CRITICAL PRE-LOOP STEP: Initial Cost Evaluation ---
     vector<float> initial_costs = evaluate_children_gpu(population, &gpu_time);
+    // vector<float> initial_costs = evaluate_children_gpu_heavy(population, &gpu_time);
     for (size_t i = 0; i < population.size(); ++i) {
         population[i].cost = initial_costs[i];
     }
@@ -282,15 +335,20 @@ void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_o
     best_scores_out.push_back(population.front().cost); // Store Gen 0 score
     vector<double> cpu_execution;
     vector<float> gpu_execution;
+        // Global-best tracking
+    float global_best_cost = population.front().cost;
+    // global_best_scores.push_back(global_best_cost);
+    if (global_best_individual)
+      *global_best_individual = population.front();
 
     for (int gen = 0; gen < NUM_GEN; ++gen) {
         double start = get_time_ms();
         // ---------------- CPU Phase 1: threaded GA operators ----------------
         vector<Individual> children_pool(POPULATION_SIZE);
 
-        const int NUM_THREADS = 64;
-        pthread_t threads[64];
-        ThreadArgs targs[64];
+        // const int NUM_THREADS = 16;
+        pthread_t threads[NUM_THREADS];
+        ThreadArgs targs[NUM_THREADS];
 
         for (int t = 0; t < NUM_THREADS; t++) {
             targs[t].tid = t;
@@ -312,6 +370,7 @@ void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_o
         cpu_execution.push_back(end-start);
         // --- CPU/GPU INTERFACE: Cost Evaluation Call (GPU SIMULATED) ---
         vector<float> costs = evaluate_children_gpu(children_pool, &gpu_time); 
+        // vector<float> costs = evaluate_children_gpu_heavy(children_pool, &gpu_time); 
         gpu_execution.push_back(gpu_time);
 
 
@@ -330,19 +389,29 @@ void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_o
 
         // Store the best cost for this generation
         best_scores_out.push_back(population.front().cost); 
-        float tmp = 0;
-        for(auto& a : cpu_execution){
-            tmp += a;
+
+                // --- Global best update (monotonic) ---
+        if (population.front().cost > global_best_cost) {
+            global_best_cost   = population.front().cost;
+            if (global_best_individual)
+                *global_best_individual = population.front();
         }
-        tmp /= cpu_execution.size();
-        *cpu_time = tmp;
-        tmp = 0;
-        for(auto& b : gpu_execution){
-            tmp += b;
-        }
-        tmp /= gpu_execution.size();
-        *gpu_latency = tmp;
+
+        // Store global best cost for convergence curve
+        global_best_scores.push_back(global_best_cost); 
     }
+    float tmp = 0;
+    for(auto& a : cpu_execution){
+        tmp += a;
+    }
+    tmp /= NUM_GEN;
+    *cpu_time = tmp;
+    tmp = 0;
+    for(auto& b : gpu_execution){
+        tmp += b;
+    }
+    tmp /= NUM_GEN;
+    *gpu_latency = tmp;
 }
 
 /**
@@ -356,6 +425,10 @@ int main(int argc, char* argv[]) {
     double start = get_time_ms();
     vector<float> sorted_results;
     vector<float> random_results;
+    vector<float> global_best_sorted_results;
+    vector<float> global_best_random_results;
+    Individual global_best_sorted_individual;
+    Individual global_best_random_individual;
 
     cout << "Running GA sequentially (" << NUM_GEN << " generations each)...\n";
 
@@ -365,22 +438,23 @@ int main(int argc, char* argv[]) {
     // Run Sorted Truncation GA
     int seed_sorted = (int)time(0);
     if(argv[1][0] == 's'){
-        run_ga_singlethread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time, &sorted_gpu_time);
+        run_ga_singlethread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time, &sorted_gpu_time, &global_best_sorted_individual, global_best_sorted_results);
     }
     else if(argv[1][0] == 'm'){
-        run_ga_multithread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time, &sorted_gpu_time);
+        run_ga_multithread(SelectionStrategy::SORTED_TRUNCATION, sorted_results, seed_sorted, &sorted_cpu_time, &sorted_gpu_time, &global_best_sorted_individual, global_best_sorted_results);
     }
 
 
     // Run Pure Random GA
     int seed_random = (int)time(0) + 1;
     if(argv[1][0] == 's'){
-        run_ga_singlethread(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time, &random_gpu_time);
+        run_ga_singlethread(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time, &random_gpu_time, &global_best_random_individual, global_best_random_results);
     }
     else if(argv[1][0] == 'm'){
-        run_ga_multithread(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time, &random_gpu_time);
+        run_ga_multithread(SelectionStrategy::RANDOM, random_results, seed_random, &random_cpu_time, &random_gpu_time, &global_best_random_individual, global_best_random_results);
     }
-
+    float global_best_sorted_cost = global_best_sorted_results.back();
+    float global_best_random_cost = global_best_random_results.back();
     // --- Final Comparison Report ---
     cout << "\n========================================================================\n";
     if(argv[1][0] == 's'){
@@ -390,48 +464,152 @@ int main(int argc, char* argv[]) {
         cout << "                           GA COMPARISON (MULTI THREADS)                   \n";
     }
     cout << "========================================================================\n";
-    cout << "Generation | Sorted Truncation Best Cost | Pure Random Best Cost\n";
-    cout << "-----------|-----------------------------|---------------------\n";
+    cout << "    Generation  | Sorted Truncation Best Cost | Pure Random Best Cost\n";
+    cout << "----------------|-----------------------------|---------------------\n";
 
     size_t num_generations = min(sorted_results.size(), random_results.size());
+    
+    bool find_sorted_optimal = false;
+    bool find_random_optimal = false;
 
     for (size_t i = 0; i < num_generations; ++i) {
-        if(i > 0 && i < num_generations - 1) continue;
+        if(i > 0) continue;
+        
+        if(i == 0)
+          cout << setw(15) << "init" << " | ";
+        else
+          cout << setw(15) << i << " | ";
+        
+        cout << setw(27) << sorted_results[i] << " | ";
+        cout << setw(19) << random_results[i] << endl;
 
-        cout << setw(10) << i << " | "
-             << setw(27) << sorted_results[i] << " | "
-             << setw(19) << random_results[i] << endl;
-
-        if (sorted_results[i] >= CHROMOSOME_LENGTH) {
-            if (i < num_generations - 1) {
-                cout << "--- OPTIMUM REACHED (Sorted) ---\n";
-            }
-            break;
+        // if (sorted_results[i] == CHROMOSOME_LENGTH) {
+        if(!find_sorted_optimal){
+          if (sorted_results[i] == global_best_sorted_cost){
+            //   if (i < num_generations) {
+            //       cout << setw(45) << "--- OPTIMUM REACHED (Sorted) ---\n";
+            //   }
+              find_sorted_optimal = true;
+              // break;
+          }
+        }
+        if(!find_sorted_optimal){
+          if (random_results[i] == global_best_random_cost){
+            //   if (i < num_generations) {
+            //       cout << setw(64) << "--- OPTIMUM REACHED (Random) ---\n";
+            //   }
+              find_random_optimal = true;
+              // break;
+          }
         }
     }
 
-    cout << "========================================================================\n";
-    cout << "Final Best Score (Sorted Truncation): " 
-         << sorted_results.back() << " / " << CHROMOSOME_LENGTH << endl;
-    cout << "Final Best Score (Pure Random):       " 
-         << random_results.back() << " / " << CHROMOSOME_LENGTH << endl;
-
-    cout << "========================================================================\n";
-    cout << "Avg. CPU Execution Time (Sorted Truncation): " 
-         << sorted_cpu_time << " ms " << endl;
-    cout << "Avg. CPU Execution Time (Pure Random):       " 
-         << random_cpu_time << " ms " << endl;
-    cout << "========================================================================\n";
-    cout << "Avg. GPU Execution Time (Sorted Truncation): " 
-         << sorted_gpu_time << " ms " << endl;
-    cout << "Avg. GPU Execution Time (Pure Random):       " 
-         << random_gpu_time << " ms " << endl;
+    // cout << "========================================================================\n";
+    cout << setw(15) << "Best Score" << " | ";
+    cout << setw(27) << global_best_sorted_cost << " | ";
+    cout << setw(19) << global_best_random_cost << endl;
+    //      << global_best_sorted_cost << " / " << CHROMOSOME_LENGTH << endl;
+    // cout << "Final Best Score (Pure Random):       " 
+    //      << global_best_random_cost << " / " << CHROMOSOME_LENGTH << endl;
     cout << "========================================================================\n";
 
-    double end = get_time_ms();
-    cout << "Global Execution Time: " << end - start << " ms " << endl;
+    cout << setw(15) << "Crossover Time" << " | ";
+    cout << setw(27) << sorted_cpu_time << " | ";
+    cout << setw(19) << random_cpu_time << endl;
+
+    cout << setw(15) << "Cost Time" << " | ";
+    cout << setw(27) << sorted_gpu_time << " | ";
+    cout << setw(19) << random_gpu_time << endl;
+
+
+
     cout << "========================================================================\n";
+    // cout << "Avg. CPU Execution Time (Sorted Truncation): " 
+    //      << sorted_cpu_time << " ms " << endl;
+    // cout << "Avg. CPU Execution Time (Pure Random):       " 
+    //      << random_cpu_time << " ms " << endl;
+    // cout << "========================================================================\n";
+    // cout << "Avg. Cost Execution Time (Sorted Truncation): " 
+    //      << sorted_gpu_time << " ms " << endl;
+    // cout << "Avg. Cost Execution Time (Pure Random):       " 
+    //      << random_gpu_time << " ms " << endl;
+    // cout << "========================================================================\n";
+
+    // double end = get_time_ms();
+    // cout << "Global Execution Time: " << end - start << " ms " << endl;
+    // cout << "========================================================================\n";
+    
+    {
+        string mode = (argv[1][0] == 's') ? "single" : "multi";
+        string filename = "ga_convergence_cpu_" + mode + ".csv";
+    
+        ofstream csv(filename);
+        csv << "Generation,Sorted,Random\n";
+    
+        size_t gens = min(global_best_sorted_results.size(), global_best_random_results.size());
+        for (size_t i = 0; i < gens; i++) {
+            csv << i << ","
+                << global_best_sorted_results[i] << ","
+                << global_best_random_results[i] << "\n";
+        }
+        csv.close();
+    
+        cout << "Saved convergence curve to " << filename << "\n";
+    }
+
+    // // --- Final Comparison Report ---
+    // cout << "\n========================================================================\n";
+    // if(argv[1][0] == 's'){
+    //     cout << "                           GA COMPARISON (SINGLE THREAD)                   \n";
+    // }
+    // else if(argv[1][0] == 'm'){
+    //     cout << "                           GA COMPARISON (MULTI THREADS)                   \n";
+    // }
+    // cout << "========================================================================\n";
+    // cout << "Generation | Sorted Truncation Best Cost | Pure Random Best Cost\n";
+    // cout << "-----------|-----------------------------|---------------------\n";
+
+    // size_t num_generations = min(sorted_results.size(), random_results.size());
+
+    // for (size_t i = 0; i < num_generations; ++i) {
+    //     if(i > 0 && i < num_generations - 1) continue;
+
+    //     cout << setw(10) << i << " | "
+    //          << setw(27) << sorted_results[i] << " | "
+    //          << setw(19) << random_results[i] << endl;
+
+    //     if (sorted_results[i] >= CHROMOSOME_LENGTH) {
+    //         if (i < num_generations - 1) {
+    //             cout << "--- OPTIMUM REACHED (Sorted) ---\n";
+    //         }
+    //         break;
+    //     }
+    // }
+
+    // cout << "========================================================================\n";
+    // cout << "Final Best Score (Sorted Truncation): " 
+    //      << sorted_results.back() << " / " << CHROMOSOME_LENGTH << endl;
+    // cout << "Final Best Score (Pure Random):       " 
+    //      << random_results.back() << " / " << CHROMOSOME_LENGTH << endl;
+
+    // cout << "========================================================================\n";
+    // cout << "Avg. CPU Execution Time (Sorted Truncation): " 
+    //      << sorted_cpu_time << " ms " << endl;
+    // cout << "Avg. CPU Execution Time (Pure Random):       " 
+    //      << random_cpu_time << " ms " << endl;
+    // cout << "========================================================================\n";
+    // cout << "Avg. Cost Function Computation Time (Sorted Truncation): " 
+    //      << sorted_gpu_time << " ms " << endl;
+    // cout << "Avg. Cost Function Computation Time (Pure Random):       " 
+    //      << random_gpu_time << " ms " << endl;
+    // cout << "========================================================================\n";
+
+    // double end = get_time_ms();
+    // cout << "Global Execution Time: " << end - start << " ms " << endl;
+    // cout << "========================================================================\n";
     return 0;
 }
+
+
 
 
