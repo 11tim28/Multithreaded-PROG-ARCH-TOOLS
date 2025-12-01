@@ -246,7 +246,8 @@ void run_ga_singlethread(SelectionStrategy strategy, vector<float>& best_scores_
     // Sort the population initially to find the best score
     sort(population.begin(), population.end(), compareIndividuals);
     best_scores_out.push_back(population.front().cost); // Store Gen 0 score    // Global-best tracking
-    float global_best_cost = population.front().cost;
+    // float global_best_cost = population.front().cost;
+    float global_best_cost = -100;
     // global_best_scores.push_back(global_best_cost);
     if (global_best_individual)
       *global_best_individual = population.front();
@@ -373,7 +374,8 @@ void run_ga_multithread(SelectionStrategy strategy, vector<float>& best_scores_o
     vector<double> cpu_execution;
     vector<float> gpu_execution;
         // Global-best tracking
-    float global_best_cost = population.front().cost;
+    // float global_best_cost = population.front().cost;
+    float global_best_cost = -100;
     // global_best_scores.push_back(global_best_cost);
     if (global_best_individual)
       *global_best_individual = population.front();
