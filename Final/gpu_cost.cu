@@ -42,6 +42,9 @@ void cost_kernel_heavy(const gene_t* d_chromosomes, float* d_costs, int num_chil
 
             acc += a * b + c;
         }
+        // Add pairwise interactions
+        if (j > 0 && child[j-1] == 1)
+            acc *= -0.5f;     // bit j conflicts with bit j-1
 
         sum += acc;
     }

@@ -196,7 +196,7 @@ std::vector<float> evaluate_children_gpu_heavy(const std::vector<Individual>& ch
 
         for (int j = 0; j < CHROMOSOME_LENGTH; j++) {
             int bit = children[i].chromosome[j];
-
+            
             // Skip if bit = 0 (still faster)
             if (bit == 0) continue;
 
@@ -210,7 +210,11 @@ std::vector<float> evaluate_children_gpu_heavy(const std::vector<Individual>& ch
 
                 acc += a * b + c;
             }
-
+            
+            // Add pairwise interactions
+            if (j > 0 && children[i].chromosome[j-1] == 1)
+                acc *= -0.5f;     // bit j conflicts with bit j-1
+                
             sum += acc;
         }
 
